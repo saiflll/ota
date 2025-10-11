@@ -1,4 +1,4 @@
-FROM golang:1.21-alpine AS build
+FROM golang:1.25-alpine AS build
 WORKDIR /app
 COPY go.mod go.sum ./
 RUN apk add --no-cache git
@@ -12,5 +12,5 @@ WORKDIR /app
 COPY --from=build /iot-ota-server /app/iot-ota-server
 COPY views /app/views
 COPY static /app/static
-EXPOSE 8080
+EXPOSE 9999
 ENTRYPOINT ["/app/iot-ota-server"]
