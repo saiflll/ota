@@ -13,9 +13,11 @@ async function fetchFiles() {
       el.className = 'flex justify-between items-center bg-slate-700 p-2 rounded';
       el.innerHTML = `
         <div class="truncate">${f.name}</div>
+        <div class="text-xs text-slate-400">${new Date(f.upload_time).toLocaleString()}</div>
         <div class="flex items-center gap-2">
-          <a class="text-indigo-300 hover:underline text-sm" href="${f.url}" target="_blank">Download</a>
           <button class="text-xs px-2 py-1 bg-slate-600 rounded" onclick="copyLink('${location.origin+f.url}')">Copy</button>
+          <button class="text-xs px-2 py-1 bg-blue-600 rounded" onclick="renameFile('${encodeURIComponent(f.name)}')">Rename</button>
+          <a class="text-indigo-300 hover:underline text-sm" href="${f.url}" target="_blank">Download</a>
           <button class="text-xs px-2 py-1 bg-red-600 rounded" onclick="deleteFile('${encodeURIComponent(f.name)}')">Delete</button>
         </div>`;
       fileList.appendChild(el);
@@ -26,8 +28,48 @@ async function fetchFiles() {
 }
 
 function copyLink(url) {
-  navigator.clipboard.writeText(url);
-  alert('Link copied: ' + url);
+  const textarea = document.createElement('textarea');
+  textarea.value = url;
+  document.body.appendChild(textarea);
+  textarea.select();
+  try {
+    document.execCommand('copy');
+    alert('Link copied: ' + url);
+  } catch (err) {
+    alert('Failed to copy link.');
+  }
+  document.body.removeChild(textarea);
+}
+
+async function renameFile(nameEnc) {
+    const name = decodeURIComponent(nameEnc);
+    const newName = prompt('Enter new name for ' + name);
+    if (!newName || newName === name) return;
+
+    const res = await fetch('/api/files/' + encodeURIComponent(name) + '/rename', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({new_name: newName})
+    });
+    const j = await res.json();
+    if (res.ok) {
+        alert('Renamed to: ' + newName);
+        fetchFiles();
+    } else {
+        alert('Rename failed: ' + (j.error || 'unknown'));
+    }
+}
+
+async function deleteNode(node) {
+  if (!confirm(`Delete node ${node}?`)) return;
+  const res = await fetch('/api/nodes/' + encodeURIComponent(node), { method: 'DELETE' });
+  const j = await res.json();
+  if (res.ok) {
+    alert('Deleted: ' + node);
+    fetchNodes();
+  } else {
+    alert('Delete failed: ' + (j.error || 'unknown'));
+  }
 }
 
 async function deleteFile(nameEnc) {
@@ -90,6 +132,7 @@ function renderNodes(nodes) {
         <button class="px-3 py-1 bg-indigo-500 rounded text-sm" onclick="openOTAModal('${k}')">OTA</button>
         <button class="px-3 py-1 bg-green-500 rounded text-sm" onclick="openThresholdModal('${k}')">Set Threshold</button>
         <button class="px-3 py-1 bg-gray-600 rounded text-sm" onclick="openLogModal('${k}')">Lihat Log</button>
+        <button class="px-3 py-1 bg-red-600 rounded text-sm" onclick="deleteNode('${k}')">Delete</button>
       </div>
     `;
     area.appendChild(card);
@@ -110,10 +153,16 @@ function openThresholdModal(node) {
   if (min === null) return;
   const max = prompt('Set max temperature (°C):', '20');
   if (max === null) return;
+  const ck = prompt('Set ck:');
+  if (ck === null) return;
+  const area = prompt('Set area:');
+  if (area === null) return;
+  const no = prompt('Set no:');
+  if (no === null) return;
   fetch('/set-threshold', {
     method: 'POST',
     headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({node, min: parseFloat(min), max: parseFloat(max)})
+    body: JSON.stringify({node, min: parseFloat(min), max: parseFloat(max), ck, area, no})
   }).then(r => r.json()).then(j => alert('Threshold sent: ' + JSON.stringify(j)));
 }
 

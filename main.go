@@ -23,10 +23,18 @@ type NodeInfo struct {
 	Logs         []string `json:"logs,omitempty"` // last 3 log lines
 }
 
+type FileInfo struct {
+	Name       string    `json:"name"`
+	URL        string    `json:"url"`
+	UploadTime time.Time `json:"upload_time"`
+}
+
 var (
 	mqttClient mqtt.Client
 	nodeMutex  sync.RWMutex
 	nodeStatus = make(map[string]*NodeInfo)
+	fileMutex  sync.RWMutex
+	fileInfos  = make(map[string]FileInfo)
 )
 
 // env helper
@@ -52,18 +60,7 @@ func main() {
 
 	// index
 	app.Get("/", func(c *fiber.Ctx) error {
-		files, _ := os.ReadDir("static/uploads")
-		fileList := []map[string]string{}
-		for _, f := range files {
-			if !f.IsDir() {
-				fileList = append(fileList, map[string]string{
-					"name": f.Name(),
-					"url":  "/files/" + f.Name(),
-				})
-			}
-		}
 		return c.Render("index", fiber.Map{
-			"files":  fileList,
 			"broker": "172.20.100.11",
 		})
 	})
@@ -75,16 +72,27 @@ func main() {
 		return c.JSON(nodeStatus)
 	})
 
+	// DELETE node endpoint
+	app.Delete("/api/nodes/:id", func(c *fiber.Ctx) error {
+		id := c.Params("id")
+		nodeMutex.Lock()
+		defer nodeMutex.Unlock()
+		if _, ok := nodeStatus[id]; ok {
+			delete(nodeStatus, id)
+			return c.JSON(fiber.Map{"status": "deleted", "node": id})
+		}
+		return c.Status(http.StatusNotFound).JSON(fiber.Map{"error": "node not found"})
+	})
+
 	// API: files list
 	app.Get("/api/files", func(c *fiber.Ctx) error {
-		files, _ := os.ReadDir("static/uploads")
-		out := []map[string]string{}
-		for _, f := range files {
-			if !f.IsDir() {
-				out = append(out, map[string]string{"name": f.Name(), "url": "/files/" + f.Name()})
-			}
+		fileMutex.RLock()
+		defer fileMutex.RUnlock()
+		files := make([]FileInfo, 0, len(fileInfos))
+		for _, f := range fileInfos {
+			files = append(files, f)
 		}
-		return c.JSON(out)
+		return c.JSON(files)
 	})
 
 	// DELETE file endpoint
@@ -93,13 +101,52 @@ func main() {
 		// security: prevent path traversal
 		clean := filepath.Base(name)
 		path := filepath.Join("static", "uploads", clean)
+
+		fileMutex.Lock()
+		defer fileMutex.Unlock()
+
 		if _, err := os.Stat(path); os.IsNotExist(err) {
 			return c.Status(http.StatusNotFound).JSON(fiber.Map{"error": "file not found"})
 		}
 		if err := os.Remove(path); err != nil {
 			return c.Status(http.StatusInternalServerError).JSON(fiber.Map{"error": "failed delete"})
 		}
+		delete(fileInfos, clean)
 		return c.JSON(fiber.Map{"status": "deleted", "name": clean})
+	})
+
+	// RENAME file endpoint
+	app.Post("/api/files/:name/rename", func(c *fiber.Ctx) error {
+		name := c.Params("name")
+		type RenameRequest struct {
+			NewName string `json:"new_name"`
+		}
+		var req RenameRequest
+		if err := c.BodyParser(&req); err != nil {
+			return c.Status(http.StatusBadRequest).JSON(fiber.Map{"error": "invalid body"})
+		}
+
+		fileMutex.Lock()
+		defer fileMutex.Unlock()
+
+		if _, ok := fileInfos[name]; !ok {
+			return c.Status(http.StatusNotFound).JSON(fiber.Map{"error": "file not found"})
+		}
+
+		oldPath := filepath.Join("static", "uploads", name)
+		newPath := filepath.Join("static", "uploads", req.NewName)
+
+		if err := os.Rename(oldPath, newPath); err != nil {
+			return c.Status(http.StatusInternalServerError).JSON(fiber.Map{"error": "failed to rename file"})
+		}
+
+		fileInfo := fileInfos[name]
+		delete(fileInfos, name)
+		fileInfo.Name = req.NewName
+		fileInfo.URL = "/files/" + req.NewName
+		fileInfos[req.NewName] = fileInfo
+
+		return c.JSON(fileInfo)
 	})
 
 	// Upload OTA (form multipart)
@@ -112,6 +159,15 @@ func main() {
 		if err := c.SaveFile(f, dst); err != nil {
 			return err
 		}
+
+		fileMutex.Lock()
+		defer fileMutex.Unlock()
+		fileInfos[f.Filename] = FileInfo{
+			Name:       f.Filename,
+			URL:        "/files/" + f.Filename,
+			UploadTime: time.Now(),
+		}
+
 		return c.Redirect("/")
 	})
 
@@ -121,12 +177,15 @@ func main() {
 			Node string  `json:"node"`
 			Min  float64 `json:"min"`
 			Max  float64 `json:"max"`
+			Ck   string  `json:"ck"`
+			Area string  `json:"area"`
+			No   string  `json:"no"`
 		}
 		var t T
 		if err := c.BodyParser(&t); err != nil {
 			return c.Status(400).JSON(fiber.Map{"error": "invalid body"})
 		}
-		payload := map[string]interface{}{"cmd": "set_threshold", "min": t.Min, "max": t.Max}
+		payload := map[string]interface{}{"cmd": "set_threshold", "min": t.Min, "max": t.Max, "ck": t.Ck, "area": t.Area, "no": t.No}
 		b, _ := json.Marshal(payload)
 		topic := fmt.Sprintf("nodes/%s/command", t.Node)
 		token := mqttClient.Publish(topic, 0, false, b)
@@ -293,7 +352,6 @@ func mqttHandler(client mqtt.Client, msg mqtt.Message) {
 		if line != "" {
 			// append
 			info.Logs = append(info.Logs, line)
-			// keep only last 3
 			if len(info.Logs) > 3 {
 				info.Logs = info.Logs[len(info.Logs)-3:]
 			}
