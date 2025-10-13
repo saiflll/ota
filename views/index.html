@@ -27,7 +27,7 @@
                 file:bg-indigo-500 file:text-white
                 hover:file:bg-indigo-600 transition-colors" />
             </div>
-            <button class="w-full bg-emerald-500 hover:bg-emerald-600 px-4 py-2 rounded-md font-bold text-white transition-colors duration-200">
+            <button type="submit" class="w-full bg-emerald-500 hover:bg-emerald-600 px-4 py-2 rounded-md font-bold text-white transition-colors duration-200">
               Upload
             </button>
           </form>
@@ -48,15 +48,17 @@
             <h3 class="text-lg font-semibold text-slate-200">📡 Nodes</h3>
             <span class="text-xs font-mono bg-slate-700 px-2 py-1 rounded">Auto-refresh: 5s</span>
           </div>
-          <p class="text-sm text-slate-400 mt-1">Klik "Lihat Log" untuk melihat 3 log terakhir dari node.</p>
+          <p class="text-sm text-slate-400 mt-1">Klik "Lihat Log" untuk melihat 3 log terakhir dari node. Set Threshold / Edit akan mengirim JSON sesuai backend.</p>
         </div>
 
         <div id="nodesArea" class="grid grid-cols-1 md:grid-cols-2 gap-4">
-          </div>
+          <div class="text-sm text-slate-400">Waiting for nodes...</div>
+        </div>
       </div>
     </div>
   </div>
 
+  <!-- Logs modal -->
   <div id="logModal" class="fixed inset-0 bg-black bg-opacity-70 hidden items-center justify-center z-50 p-4">
     <div class="bg-slate-800 rounded-lg w-full max-w-2xl p-5 shadow-2xl border border-slate-700">
       <div class="flex justify-between items-center mb-4">

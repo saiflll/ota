@@ -1,3 +1,10 @@
+// static/app.js
+// Frontend for IoT OTA & Monitor
+// - Sends JSON to /set-threshold in this format:
+//   { node, min, max, ck, area, no }
+// - Uses prompt flow for inputs (min -> max -> ck -> area -> no)
+// - Node IDs are shown as-is (server provides them)
+
 async function fetchFiles() {
   try {
     const res = await fetch('/api/files');
@@ -11,9 +18,10 @@ async function fetchFiles() {
     files.forEach(f => {
       const el = document.createElement('div');
       el.className = 'flex justify-between items-center bg-slate-700 p-2 rounded';
+      const uploadTime = f.upload_time ? new Date(f.upload_time).toLocaleString() : '';
       el.innerHTML = `
-        <div class="truncate">${f.name}</div>
-        <div class="text-xs text-slate-400">${new Date(f.upload_time).toLocaleString()}</div>
+        <div class="truncate pr-2">${escapeHtml(f.name)}</div>
+        <div class="text-xs text-slate-400 mr-3">${uploadTime}</div>
         <div class="flex items-center gap-2">
           <button class="text-xs px-2 py-1 bg-slate-600 rounded" onclick="copyLink('${location.origin+f.url}')">Copy</button>
           <button class="text-xs px-2 py-1 bg-blue-600 rounded" onclick="renameFile('${encodeURIComponent(f.name)}')">Rename</button>
@@ -28,36 +36,41 @@ async function fetchFiles() {
 }
 
 function copyLink(url) {
-  const textarea = document.createElement('textarea');
-  textarea.value = url;
-  document.body.appendChild(textarea);
-  textarea.select();
-  try {
-    document.execCommand('copy');
+  navigator.clipboard?.writeText(url).then(() => {
     alert('Link copied: ' + url);
-  } catch (err) {
-    alert('Failed to copy link.');
-  }
-  document.body.removeChild(textarea);
+  }).catch(() => {
+    // fallback
+    const textarea = document.createElement('textarea');
+    textarea.value = url;
+    document.body.appendChild(textarea);
+    textarea.select();
+    try {
+      document.execCommand('copy');
+      alert('Link copied: ' + url);
+    } catch (err) {
+      alert('Failed to copy link.');
+    }
+    document.body.removeChild(textarea);
+  });
 }
 
 async function renameFile(nameEnc) {
-    const name = decodeURIComponent(nameEnc);
-    const newName = prompt('Enter new name for ' + name);
-    if (!newName || newName === name) return;
+  const name = decodeURIComponent(nameEnc);
+  const newName = prompt('Enter new name for ' + name);
+  if (!newName || newName === name) return;
 
-    const res = await fetch('/api/files/' + encodeURIComponent(name) + '/rename', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({new_name: newName})
-    });
-    const j = await res.json();
-    if (res.ok) {
-        alert('Renamed to: ' + newName);
-        fetchFiles();
-    } else {
-        alert('Rename failed: ' + (j.error || 'unknown'));
-    }
+  const res = await fetch('/api/files/' + encodeURIComponent(name) + '/rename', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({new_name: newName})
+  });
+  const j = await res.json();
+  if (res.ok) {
+    alert('Renamed to: ' + newName);
+    fetchFiles();
+  } else {
+    alert('Rename failed: ' + (j.error || 'unknown'));
+  }
 }
 
 async function deleteNode(node) {
@@ -106,8 +119,8 @@ function renderNodes(nodes) {
 
   keys.forEach(k => {
     const info = nodes[k] || {};
-    const status = info.status || 'unknown';
-    const isOnline = (String(status).toLowerCase() === 'online');
+    const status = info.status || '';
+    const isOnline = (String(status).toLowerCase() === 'online' || String(status).toLowerCase().includes('running'));
     const dot = isOnline ? 'bg-emerald-400' : 'bg-red-500';
     const ram = info.ram_free_bytes !== undefined ? formatBytes(info.ram_free_bytes) : '-';
     const updated = info.updated || '';
@@ -116,23 +129,24 @@ function renderNodes(nodes) {
     card.className = 'bg-slate-700 p-4 rounded shadow';
     card.innerHTML = `
       <div class="flex justify-between items-start">
-        <div class="font-semibold text-lg truncate">${k}</div>
+        <div class="font-semibold text-lg truncate">${escapeHtml(k)}</div>
         <div class="flex items-center gap-2">
           <div class="w-3 h-3 rounded-full ${dot}"></div>
-          <div class="text-sm text-slate-300">${String(status)}</div>
+          <div class="text-sm text-slate-300">${escapeHtml(String(status))}</div>
         </div>
       </div>
 
       <div class="mt-3 text-sm text-slate-300 space-y-1">
         <div>RAM Free: <span class="text-slate-100 font-medium">${ram}</span></div>
-        <div class="text-xs text-slate-400 mt-2">Last: ${updated}</div>
+        <div class="text-xs text-slate-400 mt-2">Last: ${escapeHtml(updated)}</div>
       </div>
 
-      <div class="mt-3 flex gap-2">
-        <button class="px-3 py-1 bg-indigo-500 rounded text-sm" onclick="openOTAModal('${k}')">OTA</button>
-        <button class="px-3 py-1 bg-green-500 rounded text-sm" onclick="openThresholdModal('${k}')">Set Threshold</button>
-        <button class="px-3 py-1 bg-gray-600 rounded text-sm" onclick="openLogModal('${k}')">Lihat Log</button>
-        <button class="px-3 py-1 bg-red-600 rounded text-sm" onclick="deleteNode('${k}')">Delete</button>
+      <div class="mt-3 flex gap-2 flex-wrap">
+        <button class="px-3 py-1 bg-indigo-500 rounded text-sm" onclick="openOTAModal('${encodeURIComponent(k)}')">OTA</button>
+        <button class="px-3 py-1 bg-green-500 rounded text-sm" onclick="openThresholdModal('${encodeURIComponent(k)}')">Set Threshold</button>
+        <button class="px-3 py-1 bg-yellow-500 rounded text-sm" onclick="openEditModal('${encodeURIComponent(k)}')">Edit</button>
+        <button class="px-3 py-1 bg-gray-600 rounded text-sm" onclick="openLogModal('${encodeURIComponent(k)}')">Lihat Log</button>
+        <button class="px-3 py-1 bg-red-600 rounded text-sm" onclick="deleteNode('${encodeURIComponent(k)}')">Delete</button>
       </div>
     `;
     area.appendChild(card);
@@ -147,37 +161,108 @@ function formatBytes(bytes) {
   return Math.round(bytes / (kb * kb)) + ' MB';
 }
 
-// threshold modal via prompt (simple)
-function openThresholdModal(node) {
-  const min = prompt('Set min temperature (°C):', '16');
-  if (min === null) return;
-  const max = prompt('Set max temperature (°C):', '20');
-  if (max === null) return;
-  const ck = prompt('Set ck:');
-  if (ck === null) return;
-  const area = prompt('Set area:');
-  if (area === null) return;
-  const no = prompt('Set no:');
-  if (no === null) return;
-  fetch('/set-threshold', {
-    method: 'POST',
-    headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({node, min: parseFloat(min), max: parseFloat(max), ck, area, no})
-  }).then(r => r.json()).then(j => alert('Threshold sent: ' + JSON.stringify(j)));
+// === Threshold flow (used by Set Threshold and Edit) ===
+// Prompts: min -> max -> ck -> area -> no
+// Sends JSON: { node, min, max, ck, area, no } to POST /set-threshold
+
+async function promptThresholdFlow(node) {
+  // node is encoded; decode for payload
+  const decodedNode = decodeURIComponent(node);
+
+  const minStr = prompt('Set min temperature (°C):', '16');
+  if (minStr === null) return null;
+  const maxStr = prompt('Set max temperature (°C):', '20');
+  if (maxStr === null) return null;
+  const ck = prompt('Set ck (string):', '');
+  if (ck === null) return null;
+  const area = prompt('Set area (string):', '');
+  if (area === null) return null;
+  const no = prompt('Set no (string):', '');
+  if (no === null) return null;
+
+  const min = parseFloat(minStr);
+  const max = parseFloat(maxStr);
+
+  return {
+    node: decodedNode,
+    min,
+    max,
+    ck: String(ck),
+    area: String(area),
+    no: String(no)
+  };
 }
 
-function openOTAModal(node) {
-  const url = prompt('Enter OTA URL (e.g. ' + location.origin + '/files/firm.bin )');
+async function openThresholdModal(nodeEnc) {
+  const payload = await promptThresholdFlow(nodeEnc);
+  if (!payload) return;
+  try {
+    const res = await fetch('/set-threshold', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(payload)
+    });
+    const j = await res.json();
+    if (res.ok) {
+      alert('Threshold sent: ' + JSON.stringify(j));
+      // refresh nodes list after small delay
+      setTimeout(fetchNodes, 800);
+    } else {
+      alert('Failed: ' + (j.error || JSON.stringify(j)));
+    }
+  } catch (err) {
+    alert('Network error: ' + err.message);
+  }
+}
+
+// Edit uses the same flow (backend handles same payload)
+async function openEditModal(nodeEnc) {
+  const payload = await promptThresholdFlow(nodeEnc);
+  if (!payload) return;
+  // For edit, we reuse same endpoint so behavior stays consistent
+  try {
+    const res = await fetch('/set-threshold', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(payload)
+    });
+    const j = await res.json();
+    if (res.ok) {
+      alert('Edit sent: ' + JSON.stringify(j));
+      setTimeout(fetchNodes, 800);
+    } else {
+      alert('Failed edit: ' + (j.error || JSON.stringify(j)));
+    }
+  } catch (err) {
+    alert('Network error: ' + err.message);
+  }
+}
+
+async function openOTAModal(nodeEnc) {
+  const node = decodeURIComponent(nodeEnc);
+  const urlDefault = location.origin + '/files/';
+  const url = prompt('Enter OTA URL (full URL, e.g. ' + urlDefault + 'firmware.bin )');
   if (!url) return;
-  fetch('/ota', {
-    method: 'POST',
-    headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({node, url})
-  }).then(r => r.json()).then(j => alert('OTA sent: ' + JSON.stringify(j)));
+  try {
+    const res = await fetch('/ota', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({node, url})
+    });
+    const j = await res.json();
+    if (res.ok) {
+      alert('OTA sent: ' + JSON.stringify(j));
+    } else {
+      alert('OTA failed: ' + (j.error || JSON.stringify(j)));
+    }
+  } catch (err) {
+    alert('Network error: ' + err.message);
+  }
 }
 
 // LOG modal
-function openLogModal(node) {
+function openLogModal(nodeEnc) {
+  const node = decodeURIComponent(nodeEnc);
   document.getElementById('modalNode').textContent = node;
   const modal = document.getElementById('logModal');
   const body = document.getElementById('modalBody');
@@ -210,7 +295,8 @@ function closeModal() {
 
 // simple escape to avoid HTML injection
 function escapeHtml(unsafe) {
-  return unsafe
+  if (!unsafe) return '';
+  return String(unsafe)
        .replaceAll('&', '&amp;')
        .replaceAll('<', '&lt;')
        .replaceAll('>', '&gt;')
@@ -224,17 +310,22 @@ document.addEventListener('DOMContentLoaded', function() {
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
     const file = document.getElementById('fileInput').files[0];
-    if (!file) return;
+    if (!file) return alert('Pilih file terlebih dahulu');
     const fd = new FormData();
     fd.append('file', file);
     document.getElementById('uploadMsg').textContent = 'Uploading...';
-    const res = await fetch('/upload', { method: 'POST', body: fd });
-    if (res.redirected) {
-      document.getElementById('uploadMsg').textContent = 'Upload OK';
-    } else {
-      document.getElementById('uploadMsg').textContent = 'Upload finished';
+    try {
+      const res = await fetch('/upload', { method: 'POST', body: fd });
+      if (res.redirected) {
+        document.getElementById('uploadMsg').textContent = 'Upload OK';
+      } else {
+        document.getElementById('uploadMsg').textContent = 'Upload finished';
+      }
+      setTimeout(()=> fetchFiles(), 800);
+    } catch (err) {
+      document.getElementById('uploadMsg').textContent = 'Upload error';
+      console.error(err);
     }
-    setTimeout(()=> fetchFiles(), 800);
   });
 
   // initial load + interval
