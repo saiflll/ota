@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -19,7 +20,10 @@ import (
 type NodeInfo struct {
 	Status       string   `json:"status,omitempty"`
 	RamFreeBytes int64    `json:"ram_free_bytes,omitempty"`
-	SD_OK        bool     `json:"sd_ok,omitempty"`
+	SD_OK        *bool    `json:"sd_ok,omitempty"` // Use pointer to distinguish between false and not set
+	Ck           string   `json:"ck,omitempty"`
+	Area         string   `json:"area,omitempty"`
+	No           string   `json:"no,omitempty"`
 	Updated      string   `json:"updated,omitempty"`
 	Logs         []string `json:"logs,omitempty"` // last 3 log lines
 }
@@ -37,6 +41,7 @@ var (
 	fileMutex  sync.RWMutex
 	fileInfos  = make(map[string]FileInfo)
 )
+var macRegex = regexp.MustCompile(`[0-9a-fA-F]{12}`)
 
 // env helper
 func getEnv(key, def string) string {
@@ -75,7 +80,49 @@ func main() {
 	app.Get("/api/nodes", func(c *fiber.Ctx) error {
 		nodeMutex.RLock()
 		defer nodeMutex.RUnlock()
-		return c.JSON(nodeStatus)
+
+		// Deduplication logic: only show the latest entry for each MAC address.
+		// Assumes MAC is the last part of the node ID.
+		latestNodes := make(map[string]*NodeInfo)
+		macToNodeID := make(map[string]string)
+
+		// Step 1: Find the latest node ID for each MAC address
+		for id, info := range nodeStatus {
+			matches := macRegex.FindAllString(id, -1)
+			mac := id
+			if len(matches) > 0 {
+				mac = matches[len(matches)-1]
+			}
+
+			existingNodeID, found := macToNodeID[mac]
+			if !found {
+				macToNodeID[mac] = id
+			} else if info.Updated > nodeStatus[existingNodeID].Updated {
+				// This node is newer than the one we previously recorded for this MAC.
+				// Update our record to point to this newer node ID.
+				macToNodeID[mac] = id
+			}
+		}
+
+		// Step 2: Build the final list of nodes from the winners identified in Step 1.
+		for _, latestID := range macToNodeID {
+			latestNodes[latestID] = nodeStatus[latestID]
+		}
+
+		// After deduplication, check for staleness
+		now := time.Now()
+		for _, info := range latestNodes {
+			if info.Updated != "" {
+				updatedTime, err := time.Parse("2006-01-02 15:04:05", info.Updated)
+				if err == nil {
+					if now.Sub(updatedTime) > 10*time.Second {
+						info.Status = "offline" // Mark as offline if older than 10s
+					}
+				}
+			}
+		}
+
+		return c.JSON(latestNodes)
 	})
 
 	// DELETE node endpoint
@@ -83,11 +130,44 @@ func main() {
 		id := c.Params("id")
 		nodeMutex.Lock()
 		defer nodeMutex.Unlock()
-		if _, ok := nodeStatus[id]; ok {
-			delete(nodeStatus, id)
-			return c.JSON(fiber.Map{"status": "deleted", "node": id})
+
+		// Find the MAC of the node to be deleted
+		matches := macRegex.FindAllString(id, -1)
+		if len(matches) == 0 {
+			// If no MAC found, just delete the specific node
+			if _, ok := nodeStatus[id]; ok {
+				delete(nodeStatus, id)
+				// Clear its retained messages
+				mqttClient.Publish(fmt.Sprintf("nodes/%s/status", id), 0, true, []byte{})
+				mqttClient.Publish(fmt.Sprintf("nodes/%s/monitor", id), 0, true, []byte{})
+				return c.JSON(fiber.Map{"status": "deleted", "node": id})
+			}
+			return c.Status(http.StatusNotFound).JSON(fiber.Map{"error": "node not found"})
 		}
-		return c.Status(http.StatusNotFound).JSON(fiber.Map{"error": "node not found"})
+		targetMac := matches[len(matches)-1]
+
+		// Iterate over all nodes and delete any that match the target MAC
+		nodesToDelete := []string{}
+		deletedCount := 0
+		for nodeID := range nodeStatus {
+			nodeMacMatches := macRegex.FindAllString(nodeID, -1)
+			if len(nodeMacMatches) > 0 && nodeMacMatches[len(nodeMacMatches)-1] == targetMac {
+				nodesToDelete = append(nodesToDelete, nodeID)
+			}
+		}
+
+		for _, nodeID := range nodesToDelete {
+			delete(nodeStatus, nodeID)
+			mqttClient.Publish(fmt.Sprintf("nodes/%s/status", nodeID), 0, true, []byte{})
+			mqttClient.Publish(fmt.Sprintf("nodes/%s/monitor", nodeID), 0, true, []byte{})
+			deletedCount++
+		}
+
+		if deletedCount > 0 {
+			return c.JSON(fiber.Map{"status": "deleted", "mac": targetMac, "count": deletedCount})
+		}
+
+		return c.Status(http.StatusNotFound).JSON(fiber.Map{"error": "no nodes found for the given ID or MAC"})
 	})
 
 	// API: files list
@@ -202,6 +282,14 @@ func main() {
 		if err != nil {
 			return c.Status(http.StatusInternalServerError).JSON(fiber.Map{"error": "failed to create payload"})
 		}
+
+		// Save the config values to the node's state
+		nodeMutex.Lock()
+		if info, ok := nodeStatus[t.Node]; ok {
+			info.Ck, info.Area, info.No = t.Ck, t.Area, t.No
+		}
+		nodeMutex.Unlock()
+
 		topic := fmt.Sprintf("nodes/%s/command", t.Node)
 		token := mqttClient.Publish(topic, 0, false, b)
 		token.Wait()
@@ -341,6 +429,31 @@ func mqttHandler(client mqtt.Client, msg mqtt.Message) {
 
 	nodeMutex.Lock()
 	defer nodeMutex.Unlock()
+
+	// --- Smart Node Migration Logic ---
+	// If a new nodeID appears for an existing MAC, migrate config and delete the old one.
+	if _, ok := nodeStatus[nodeID]; !ok {
+		newMacMatches := macRegex.FindAllString(nodeID, -1)
+		if len(newMacMatches) > 0 {
+			newMac := newMacMatches[len(newMacMatches)-1]
+			// Find the old node ID with the same MAC
+			for oldID, oldInfo := range nodeStatus {
+				if oldID == nodeID {
+					continue
+				}
+				oldMacMatches := macRegex.FindAllString(oldID, -1)
+				if len(oldMacMatches) > 0 && oldMacMatches[len(oldMacMatches)-1] == newMac {
+					// Found an old node for this MAC. Migrate data and delete it.
+					log.Printf("Migrating config from old node '%s' to new node '%s'", oldID, nodeID)
+					newNodeInfo := &NodeInfo{Ck: oldInfo.Ck, Area: oldInfo.Area, No: oldInfo.No}
+					nodeStatus[nodeID] = newNodeInfo
+					delete(nodeStatus, oldID)
+					break // Assume only one old node per MAC
+				}
+			}
+		}
+	}
+
 	if _, ok := nodeStatus[nodeID]; !ok {
 		nodeStatus[nodeID] = &NodeInfo{}
 	}
@@ -374,11 +487,13 @@ func mqttHandler(client mqtt.Client, msg mqtt.Message) {
 			}
 			if v, ok := m["sd_ok"]; ok {
 				if b, ok := v.(bool); ok {
-					info.SD_OK = b
+					info.SD_OK = &b
 				}
 			}
 			// optionally parse other fields if present
 		}
+		// Log if unmarshal fails, to help debug malformed payloads from devices
+		// else { log.Printf("failed to unmarshal monitor payload from %s: %s", nodeID, string(raw)) }
 		info.Updated = now
 
 	case "log":

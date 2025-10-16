@@ -23,10 +23,10 @@ async function fetchFiles() {
         <div class="truncate pr-2">${escapeHtml(f.name)}</div>
         <div class="text-xs text-slate-400 mr-3">${uploadTime}</div>
         <div class="flex items-center gap-2">
-          <button class="text-xs px-2 py-1 bg-slate-600 rounded" onclick="copyLink('${location.origin+f.url}')">Copy</button>
-          <button class="text-xs px-2 py-1 bg-blue-600 rounded" onclick="renameFile('${encodeURIComponent(f.name)}')">Rename</button>
+          <button data-action="copy-link" data-url="${location.origin+f.url}" class="text-xs px-2 py-1 bg-slate-600 rounded">Copy</button>
+          <button data-action="rename-file" data-name="${encodeURIComponent(f.name)}" class="text-xs px-2 py-1 bg-blue-600 rounded">Rename</button>
           <a class="text-indigo-300 hover:underline text-sm" href="${f.url}" target="_blank">Download</a>
-          <button class="text-xs px-2 py-1 bg-red-600 rounded" onclick="deleteFile('${encodeURIComponent(f.name)}')">Delete</button>
+          <button data-action="delete-file" data-name="${encodeURIComponent(f.name)}" class="text-xs px-2 py-1 bg-red-600 rounded">Delete</button>
         </div>`;
       fileList.appendChild(el);
     });
@@ -109,28 +109,44 @@ async function fetchNodes() {
 }
 
 function renderNodes(nodes) {
-  const area = document.getElementById('nodesArea');
-  area.innerHTML = '';
+  const runningArea = document.getElementById('runningNodes');
+  const offlineArea = document.getElementById('offlineNodes');
+  runningArea.innerHTML = '';
+  offlineArea.innerHTML = '';
+
   const keys = Object.keys(nodes).sort();
+  let runningCount = 0;
+  let offlineCount = 0;
+
   if (keys.length === 0) {
-    area.innerHTML = '<div class="text-sm text-slate-400">No nodes yet (waiting MQTT messages)</div>';
+    runningArea.innerHTML = '<div class="text-sm text-slate-400 md:col-span-2">No nodes yet (waiting for MQTT messages)</div>';
+    document.getElementById('count-running').textContent = '0';
+    document.getElementById('count-offline').textContent = '0';
     return;
   }
 
   keys.forEach(k => {
+    const formattedNodeId = formatNodeId(k);
     const info = nodes[k] || {};
     const status = info.status || '';
-    const isOnline = (String(status).toLowerCase() === 'online' || String(status).toLowerCase().includes('running'));
+    // Status 'offline' is now explicitly set by the backend based on time
+    const isOnline = String(status).toLowerCase() !== 'offline';
     const dot = isOnline ? 'bg-emerald-400' : 'bg-red-500';
     const ram = info.ram_free_bytes !== undefined ? formatBytes(info.ram_free_bytes) : '-';
+    const sd_ok = info.sd_ok; // Will be true, false, or null/undefined
     const updated = info.updated || '';
 
     const card = document.createElement('div');
     card.className = 'bg-slate-700 p-4 rounded shadow';
     card.innerHTML = `
       <div class="flex justify-between items-start">
-        <div class="font-semibold text-lg truncate">${escapeHtml(k)}</div>
+        <div class="font-semibold text-lg truncate" title="${escapeHtml(k)}">${formattedNodeId}</div>
         <div class="flex items-center gap-2">
+          ${sd_ok !== undefined && sd_ok !== null ? `
+            <div class="flex items-center gap-1.5" title="SD Card Status">
+              <div class="w-3 h-3 rounded-full ${sd_ok ? 'bg-green-400' : 'bg-red-500'}"></div>
+            </div>
+          ` : ''}
           <div class="w-3 h-3 rounded-full ${dot}"></div>
           <div class="text-sm text-slate-300">${escapeHtml(String(status))}</div>
         </div>
@@ -142,15 +158,26 @@ function renderNodes(nodes) {
       </div>
 
       <div class="mt-3 flex gap-2 flex-wrap">
-        <button class="px-3 py-1 bg-indigo-500 rounded text-sm" onclick="openOTAModal('${encodeURIComponent(k)}')">OTA</button>
-        <button class="px-3 py-1 bg-green-500 rounded text-sm" onclick="openConfigModal('${encodeURIComponent(k)}', 'Set Threshold')">Set Threshold</button>
-        <button class="px-3 py-1 bg-yellow-500 rounded text-sm" onclick="openConfigModal('${encodeURIComponent(k)}', 'Edit Config')">Edit</button>
-        <button class="px-3 py-1 bg-gray-600 rounded text-sm" onclick="openLogModal('${encodeURIComponent(k)}')">Lihat Log</button>
-        <button class="px-3 py-1 bg-red-600 rounded text-sm" onclick="deleteNode('${encodeURIComponent(k)}')">Delete</button>
+        <button data-action="ota" data-node="${encodeURIComponent(k)}" class="px-3 py-1 bg-indigo-500 rounded text-sm">OTA</button>
+        <button data-action="configure" data-node="${encodeURIComponent(k)}" class="px-3 py-1 bg-yellow-500 rounded text-sm">Configure</button>
+        <button data-action="logs" data-node="${encodeURIComponent(k)}" class="px-3 py-1 bg-gray-600 rounded text-sm">Lihat Log</button>
+        <button data-action="delete-node" data-node="${encodeURIComponent(k)}" class="px-3 py-1 bg-red-600 rounded text-sm">Delete</button>
       </div>
     `;
-    area.appendChild(card);
+
+    if (isOnline) {
+      runningArea.appendChild(card);
+      runningCount++;
+    } else {
+      offlineArea.appendChild(card);
+      offlineCount++;
+    }
   });
+
+  document.getElementById('count-running').textContent = runningCount;
+  document.getElementById('count-offline').textContent = offlineCount;
+  if (runningCount === 0) runningArea.innerHTML = '<div class="text-sm text-slate-400 md:col-span-2">No running nodes.</div>';
+  if (offlineCount === 0) offlineArea.innerHTML = '<div class="text-sm text-slate-400 md:col-span-2">No offline nodes.</div>';
 }
 
 function formatBytes(bytes) {
@@ -161,19 +188,40 @@ function formatBytes(bytes) {
   return Math.round(bytes / (kb * kb)) + ' MB';
 }
 
+function formatNodeId(nodeId) {
+  if (!nodeId) return '';
+
+  // The MAC address is always the last 12 characters.
+  if (nodeId.length < 12) {
+    return escapeHtml(nodeId);
+  }
+
+  const mac = nodeId.slice(-12);
+  let prefix = nodeId.slice(0, -12);
+
+  // Format the prefix: replace hyphens and remove any trailing slash
+  prefix = prefix.replace(/-/g, '/').replace(/\/$/, '');
+
+  // Format MAC with colons
+  const formattedMac = mac.match(/.{1,2}/g)?.join(':') || mac;
+
+  return `${escapeHtml(prefix)} - <span class="text-indigo-300">${escapeHtml(formattedMac)}</span>`;
+}
+
 // === Config flow (used by Set Threshold and Edit) ===
-async function promptConfigFlow(node) {
+async function promptConfigFlow(node, existingInfo) {
   const decodedNode = decodeURIComponent(node);
+  const info = existingInfo || {};
 
   const minStr = prompt('Set min temperature (°C):', '16');
   if (minStr === null) return null;
   const maxStr = prompt('Set max temperature (°C):', '20');
   if (maxStr === null) return null;
-  const ck = prompt('Set ck (string):', '');
+  const ck = prompt('Set ck (string):', info.ck || '');
   if (ck === null) return null;
-  const area = prompt('Set area (string):', '');
+  const area = prompt('Set area (string):', info.area || '');
   if (area === null) return null;
-  const no = prompt('Set no (string):', '');
+  const no = prompt('Set no (string):', info.no || '');
   if (no === null) return null;
 
   return {
@@ -187,7 +235,14 @@ async function promptConfigFlow(node) {
 }
 
 async function openConfigModal(nodeEnc, action = 'Config') {
-  const payload = await promptConfigFlow(nodeEnc);
+  // Get current node data to pre-fill the prompts
+  const nodesRes = await fetch('/api/nodes');
+  const allNodes = await nodesRes.json();
+  const nodeInfo = allNodes[decodeURIComponent(nodeEnc)];
+  if (!nodeInfo) {
+    return showToast('Node data not found, cannot configure.', 'error');
+  }
+  const payload = await promptConfigFlow(nodeEnc, nodeInfo);
   if (!payload) return;
 
   try {
@@ -209,10 +264,7 @@ async function openConfigModal(nodeEnc, action = 'Config') {
   }
 }
 
-async function openThresholdModal(nodeEnc) {
-  // This function is now replaced by openConfigModal
-  await openConfigModal(nodeEnc, 'Set Threshold');
-}
+/* The old openThresholdModal function has been removed as it is redundant. */
 
 
 async function openOTAModal(nodeEnc) {
@@ -321,6 +373,67 @@ document.addEventListener('DOMContentLoaded', function() {
       document.getElementById('uploadMsg').textContent = 'Upload error';
       console.error(err);
     }
+  });
+
+  // Centralized event listener for all actions
+  document.body.addEventListener('click', (e) => {
+    const button = e.target.closest('[data-action]');
+    if (!button) return;
+
+    const action = button.dataset.action;
+    const node = button.dataset.node;
+    const name = button.dataset.name;
+    const url = button.dataset.url;
+
+    switch (action) {
+      case 'ota':
+        openOTAModal(node);
+        break;
+      case 'configure':
+        openConfigModal(node, 'Configure');
+        break;
+      case 'logs':
+        openLogModal(node);
+        break;
+      case 'delete-node':
+        deleteNode(node);
+        break;
+      case 'copy-link':
+        copyLink(url);
+        break;
+      case 'rename-file':
+        renameFile(name);
+        break;
+      case 'delete-file':
+        deleteFile(name);
+        break;
+      case 'close-modal':
+        closeModal();
+        break;
+    }
+  });
+
+  // Tab switching logic
+  const tabs = document.querySelectorAll('.tab-button');
+  const tabContents = document.querySelectorAll('.tab-content');
+  tabs.forEach(tab => {
+    tab.addEventListener('click', () => {
+      // Deactivate all tabs
+      tabs.forEach(t => {
+        t.classList.remove('border-indigo-500', 'text-indigo-400');
+        t.classList.add('border-transparent', 'text-slate-400', 'hover:text-slate-200', 'hover:border-slate-400');
+      });
+      // Deactivate all content
+      tabContents.forEach(c => c.classList.add('hidden'));
+
+      // Activate clicked tab
+      tab.classList.add('border-indigo-500', 'text-indigo-400');
+      tab.classList.remove('border-transparent', 'text-slate-400', 'hover:text-slate-200', 'hover:border-slate-400');
+      
+      // Activate corresponding content
+      const targetContentId = tab.id.replace('tab-', '') + 'Nodes';
+      document.getElementById(targetContentId).classList.remove('hidden');
+    });
   });
 
   // initial load + interval
