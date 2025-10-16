@@ -37,7 +37,7 @@ async function fetchFiles() {
 
 function copyLink(url) {
   navigator.clipboard?.writeText(url).then(() => {
-    alert('Link copied: ' + url);
+    showToast('Link copied!', 'success');
   }).catch(() => {
     // fallback
     const textarea = document.createElement('textarea');
@@ -46,9 +46,9 @@ function copyLink(url) {
     textarea.select();
     try {
       document.execCommand('copy');
-      alert('Link copied: ' + url);
+      showToast('Link copied!', 'success');
     } catch (err) {
-      alert('Failed to copy link.');
+      showToast('Failed to copy link.', 'error');
     }
     document.body.removeChild(textarea);
   });
@@ -66,22 +66,22 @@ async function renameFile(nameEnc) {
   });
   const j = await res.json();
   if (res.ok) {
-    alert('Renamed to: ' + newName);
+    showToast(`Renamed to: ${newName}`, 'success');
     fetchFiles();
   } else {
-    alert('Rename failed: ' + (j.error || 'unknown'));
+    showToast(`Rename failed: ${j.error || 'unknown'}`, 'error');
   }
 }
 
 async function deleteNode(node) {
-  if (!confirm(`Delete node ${node}?`)) return;
-  const res = await fetch('/api/nodes/' + encodeURIComponent(node), { method: 'DELETE' });
+  if (!confirm(`Delete node ${decodeURIComponent(node)}?`)) return;
+  const res = await fetch('/api/nodes/' + node, { method: 'DELETE' });
   const j = await res.json();
   if (res.ok) {
-    alert('Deleted: ' + node);
+    showToast(`Deleted node: ${decodeURIComponent(node)}`, 'success');
     fetchNodes();
   } else {
-    alert('Delete failed: ' + (j.error || 'unknown'));
+    showToast(`Delete failed: ${j.error || 'unknown'}`, 'error');
   }
 }
 
@@ -91,10 +91,10 @@ async function deleteFile(nameEnc) {
   const res = await fetch('/api/files/' + encodeURIComponent(name), { method: 'DELETE' });
   const j = await res.json();
   if (res.ok) {
-    alert('Deleted: ' + name);
+    showToast(`Deleted file: ${name}`, 'success');
     fetchFiles();
   } else {
-    alert('Delete failed: ' + (j.error || 'unknown'));
+    showToast(`Delete failed: ${j.error || 'unknown'}`, 'error');
   }
 }
 
@@ -143,8 +143,8 @@ function renderNodes(nodes) {
 
       <div class="mt-3 flex gap-2 flex-wrap">
         <button class="px-3 py-1 bg-indigo-500 rounded text-sm" onclick="openOTAModal('${encodeURIComponent(k)}')">OTA</button>
-        <button class="px-3 py-1 bg-green-500 rounded text-sm" onclick="openThresholdModal('${encodeURIComponent(k)}')">Set Threshold</button>
-        <button class="px-3 py-1 bg-yellow-500 rounded text-sm" onclick="openEditModal('${encodeURIComponent(k)}')">Edit</button>
+        <button class="px-3 py-1 bg-green-500 rounded text-sm" onclick="openConfigModal('${encodeURIComponent(k)}', 'Set Threshold')">Set Threshold</button>
+        <button class="px-3 py-1 bg-yellow-500 rounded text-sm" onclick="openConfigModal('${encodeURIComponent(k)}', 'Edit Config')">Edit</button>
         <button class="px-3 py-1 bg-gray-600 rounded text-sm" onclick="openLogModal('${encodeURIComponent(k)}')">Lihat Log</button>
         <button class="px-3 py-1 bg-red-600 rounded text-sm" onclick="deleteNode('${encodeURIComponent(k)}')">Delete</button>
       </div>
@@ -161,12 +161,8 @@ function formatBytes(bytes) {
   return Math.round(bytes / (kb * kb)) + ' MB';
 }
 
-// === Threshold flow (used by Set Threshold and Edit) ===
-// Prompts: min -> max -> ck -> area -> no
-// Sends JSON: { node, min, max, ck, area, no } to POST /set-threshold
-
-async function promptThresholdFlow(node) {
-  // node is encoded; decode for payload
+// === Config flow (used by Set Threshold and Edit) ===
+async function promptConfigFlow(node) {
   const decodedNode = decodeURIComponent(node);
 
   const minStr = prompt('Set min temperature (°C):', '16');
@@ -180,63 +176,44 @@ async function promptThresholdFlow(node) {
   const no = prompt('Set no (string):', '');
   if (no === null) return null;
 
-  const min = parseFloat(minStr);
-  const max = parseFloat(maxStr);
-
   return {
     node: decodedNode,
-    min,
-    max,
+    min: parseFloat(minStr),
+    max: parseFloat(maxStr),
     ck: String(ck),
     area: String(area),
     no: String(no)
   };
 }
 
-async function openThresholdModal(nodeEnc) {
-  const payload = await promptThresholdFlow(nodeEnc);
+async function openConfigModal(nodeEnc, action = 'Config') {
+  const payload = await promptConfigFlow(nodeEnc);
   if (!payload) return;
+
   try {
-    const res = await fetch('/set-threshold', {
+    showToast(`Sending ${action}...`);
+    const res = await fetch('/config', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
       body: JSON.stringify(payload)
     });
     const j = await res.json();
     if (res.ok) {
-      alert('Threshold sent: ' + JSON.stringify(j));
-      // refresh nodes list after small delay
+      showToast(`${action} sent successfully!`, 'success');
       setTimeout(fetchNodes, 800);
     } else {
-      alert('Failed: ' + (j.error || JSON.stringify(j)));
+      showToast(`Failed to send ${action}: ${j.error || 'Unknown error'}`, 'error');
     }
   } catch (err) {
-    alert('Network error: ' + err.message);
+    showToast(`Network error: ${err.message}`, 'error');
   }
 }
 
-// Edit uses the same flow (backend handles same payload)
-async function openEditModal(nodeEnc) {
-  const payload = await promptThresholdFlow(nodeEnc);
-  if (!payload) return;
-  // For edit, we reuse same endpoint so behavior stays consistent
-  try {
-    const res = await fetch('/set-threshold', {
-      method: 'POST',
-      headers: {'Content-Type':'application/json'},
-      body: JSON.stringify(payload)
-    });
-    const j = await res.json();
-    if (res.ok) {
-      alert('Edit sent: ' + JSON.stringify(j));
-      setTimeout(fetchNodes, 800);
-    } else {
-      alert('Failed edit: ' + (j.error || JSON.stringify(j)));
-    }
-  } catch (err) {
-    alert('Network error: ' + err.message);
-  }
+async function openThresholdModal(nodeEnc) {
+  // This function is now replaced by openConfigModal
+  await openConfigModal(nodeEnc, 'Set Threshold');
 }
+
 
 async function openOTAModal(nodeEnc) {
   const node = decodeURIComponent(nodeEnc);
@@ -251,12 +228,12 @@ async function openOTAModal(nodeEnc) {
     });
     const j = await res.json();
     if (res.ok) {
-      alert('OTA sent: ' + JSON.stringify(j));
+      showToast('OTA command sent!', 'success');
     } else {
-      alert('OTA failed: ' + (j.error || JSON.stringify(j)));
+      showToast(`OTA failed: ${j.error || 'Unknown error'}`, 'error');
     }
   } catch (err) {
-    alert('Network error: ' + err.message);
+    showToast(`Network error: ${err.message}`, 'error');
   }
 }
 
@@ -302,6 +279,24 @@ function escapeHtml(unsafe) {
        .replaceAll('>', '&gt;')
        .replaceAll('"', '&quot;')
        .replaceAll("'", '&#039;');
+}
+
+// Toast notification function
+function showToast(message, type = 'info') {
+  const toast = document.createElement('div');
+  const colors = {
+    info: 'bg-blue-500',
+    success: 'bg-emerald-500',
+    error: 'bg-red-500',
+  };
+  toast.className = `fixed bottom-5 right-5 px-4 py-2 rounded-md text-white shadow-lg transition-opacity duration-300 ${colors[type] || colors.info}`;
+  toast.textContent = message;
+  document.body.appendChild(toast);
+
+  setTimeout(() => {
+    toast.style.opacity = '0';
+    setTimeout(() => toast.remove(), 300);
+  }, 3000);
 }
 
 // upload form

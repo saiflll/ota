@@ -19,6 +19,7 @@ import (
 type NodeInfo struct {
 	Status       string   `json:"status,omitempty"`
 	RamFreeBytes int64    `json:"ram_free_bytes,omitempty"`
+	SD_OK        bool     `json:"sd_ok,omitempty"`
 	Updated      string   `json:"updated,omitempty"`
 	Logs         []string `json:"logs,omitempty"` // last 3 log lines
 }
@@ -47,8 +48,12 @@ func getEnv(key, def string) string {
 
 func main() {
 	// ensure upload dir
-	_ = os.MkdirAll("static/uploads", 0755)
+	if err := os.MkdirAll("static/uploads", 0755); err != nil {
+		log.Fatalf("failed to create upload directory: %v", err)
+	}
 
+	// Load existing files on startup
+	loadInitialFiles("static/uploads")
 	engine := html.New("./views", ".html")
 	app := fiber.New(fiber.Config{
 		Views: engine,
@@ -60,8 +65,9 @@ func main() {
 
 	// index
 	app.Get("/", func(c *fiber.Ctx) error {
+		brokerHost := getEnv("MQTT_BROKER", "tcp://172.20.100.11:1883")
 		return c.Render("index", fiber.Map{
-			"broker": "172.20.100.11",
+			"broker": brokerHost,
 		})
 	})
 
@@ -126,6 +132,12 @@ func main() {
 			return c.Status(http.StatusBadRequest).JSON(fiber.Map{"error": "invalid body"})
 		}
 
+		// Sanitize new file name to prevent path traversal or invalid names
+		cleanNewName := filepath.Base(req.NewName)
+		if cleanNewName == "" || cleanNewName == "." || cleanNewName == ".." {
+			return c.Status(http.StatusBadRequest).JSON(fiber.Map{"error": "invalid new name"})
+		}
+
 		fileMutex.Lock()
 		defer fileMutex.Unlock()
 
@@ -134,7 +146,7 @@ func main() {
 		}
 
 		oldPath := filepath.Join("static", "uploads", name)
-		newPath := filepath.Join("static", "uploads", req.NewName)
+		newPath := filepath.Join("static", "uploads", cleanNewName)
 
 		if err := os.Rename(oldPath, newPath); err != nil {
 			return c.Status(http.StatusInternalServerError).JSON(fiber.Map{"error": "failed to rename file"})
@@ -142,9 +154,9 @@ func main() {
 
 		fileInfo := fileInfos[name]
 		delete(fileInfos, name)
-		fileInfo.Name = req.NewName
-		fileInfo.URL = "/files/" + req.NewName
-		fileInfos[req.NewName] = fileInfo
+		fileInfo.Name = cleanNewName
+		fileInfo.URL = "/files/" + cleanNewName
+		fileInfos[cleanNewName] = fileInfo
 
 		return c.JSON(fileInfo)
 	})
@@ -171,8 +183,8 @@ func main() {
 		return c.Redirect("/")
 	})
 
-	// Set threshold -> publish to nodes/{id}/command
-	app.Post("/set-threshold", func(c *fiber.Ctx) error {
+	// Config -> publish to nodes/{id}/command
+	app.Post("/config", func(c *fiber.Ctx) error {
 		type T struct {
 			Node string  `json:"node"`
 			Min  float64 `json:"min"`
@@ -186,7 +198,10 @@ func main() {
 			return c.Status(400).JSON(fiber.Map{"error": "invalid body"})
 		}
 		payload := map[string]interface{}{"cmd": "set_threshold", "min": t.Min, "max": t.Max, "ck": t.Ck, "area": t.Area, "no": t.No}
-		b, _ := json.Marshal(payload)
+		b, err := json.Marshal(payload)
+		if err != nil {
+			return c.Status(http.StatusInternalServerError).JSON(fiber.Map{"error": "failed to create payload"})
+		}
 		topic := fmt.Sprintf("nodes/%s/command", t.Node)
 		token := mqttClient.Publish(topic, 0, false, b)
 		token.Wait()
@@ -204,7 +219,10 @@ func main() {
 			return c.Status(400).JSON(fiber.Map{"error": "invalid body"})
 		}
 		payload := map[string]interface{}{"cmd": "ota", "url": o.URL}
-		b, _ := json.Marshal(payload)
+		b, err := json.Marshal(payload)
+		if err != nil {
+			return c.Status(http.StatusInternalServerError).JSON(fiber.Map{"error": "failed to create payload"})
+		}
 		topic := fmt.Sprintf("nodes/%s/command", o.Node)
 		token := mqttClient.Publish(topic, 0, false, b)
 		token.Wait()
@@ -227,6 +245,27 @@ func main() {
 
 	// Listen
 	log.Fatal(app.Listen("0.0.0.0:9999"))
+}
+
+func loadInitialFiles(dir string) {
+	fileMutex.Lock()
+	defer fileMutex.Unlock()
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		log.Printf("could not read upload directory %s: %v", dir, err)
+		return
+	}
+
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			info, err := entry.Info()
+			if err == nil {
+				name := info.Name()
+				fileInfos[name] = FileInfo{Name: name, URL: "/files/" + name, UploadTime: info.ModTime()}
+			}
+		}
+	}
 }
 
 func initMQTT() {
@@ -329,15 +368,13 @@ func mqttHandler(client mqtt.Client, msg mqtt.Message) {
 		var m map[string]interface{}
 		if err := json.Unmarshal(raw, &m); err == nil {
 			if v, ok := m["ram_free_bytes"]; ok {
-				switch val := v.(type) {
-				case float64:
+				if val, ok := v.(float64); ok { // JSON numbers are float64 by default
 					info.RamFreeBytes = int64(val)
-				case int:
-					info.RamFreeBytes = int64(val)
-				case int64:
-					info.RamFreeBytes = val
-				default:
-					// ignore
+				}
+			}
+			if v, ok := m["sd_ok"]; ok {
+				if b, ok := v.(bool); ok {
+					info.SD_OK = b
 				}
 			}
 			// optionally parse other fields if present
